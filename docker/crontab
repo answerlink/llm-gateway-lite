@@ -1,0 +1,4 @@
+# 每天凌晨 2 点执行日志轮转
+0 2 * * * /usr/sbin/logrotate -f /etc/logrotate.d/llm-gateway.conf >> /var/log/llm-gateway/logrotate.log 2>&1
+# 每小时检查一次日志大小，如果超过 100MB 强制轮转
+0 * * * * find /var/log/llm-gateway -name "*.log" -size +100M -exec /usr/sbin/logrotate -f /etc/logrotate.d/llm-gateway.conf \; >> /var/log/llm-gateway/logrotate.log 2>&1

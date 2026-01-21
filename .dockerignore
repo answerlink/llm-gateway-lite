@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# 文档
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
+docs/
+
+# 日志文件
+logs/
+*.log
+*.log.*
+
+# 配置文件（包含敏感信息）
+configs/providers.yaml
+configs/models.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+.dockerignore
+docker-compose*.yml
+
+# 脚本（不需要在镜像中）
+scripts/
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+
+# 其他
+.env
+.env.*

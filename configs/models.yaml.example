@@ -1,0 +1,32 @@
+version: 1
+
+models:
+  chatgpt3.5:
+    aliases:
+      - "chatgpt3.5"
+      - "gpt-3.5-turbo"
+      - "openai/chatgpt3.5"
+    provider_map:
+      openai: "gpt-3.5-turbo"
+      openrouter: "openai/gpt-3.5-turbo"
+      gemini: "gemini-3.0-flash"
+    policy:
+      allow_providers:
+        - "openai"
+        - "openrouter"
+      default_provider: "openai"
+
+  gpt4o-mini:
+    aliases:
+      - "gpt-4o-mini"
+      - "openai/gpt-4o-mini"
+    provider_map:
+      openai: "gpt-4o-mini"
+      openrouter: "openai/gpt-4o-mini"
+
+  gemini-3-flash-preview:
+    aliases:
+      - "gemini-3-flash-preview"
+      - "google/gemini-3-flash-preview"
+    provider_map:
+      gemini: "gemini-3-flash-preview"

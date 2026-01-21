@@ -1,0 +1,22 @@
+LLM Gateway Lite
+Copyright 2026 LLM Gateway Lite Contributors
+
+This product includes software developed by the LLM Gateway Lite project
+(https://github.com/your-username/llm-gateway-lite).
+
+This software contains code derived from or inspired by:
+
+- OpenResty (https://openresty.org/)
+  Copyright (C) Yichun Zhang (agentzh)
+  Licensed under the BSD License
+
+- lua-resty-http (https://github.com/ledgetech/lua-resty-http)
+  Copyright (c) 2013-2021 James Hurst
+  Licensed under the 2-clause BSD License
+
+- lyaml (https://github.com/gvvaughan/lyaml)
+  Copyright (C) 2013-2020 Gary V. Vaughan
+  Licensed under the MIT License
+
+The project also incorporates ideas and patterns from the broader
+OpenAI API ecosystem and community best practices.
