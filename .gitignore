@@ -4,6 +4,7 @@ configs/models.yaml
 
 # 日志文件
 logs/*.log
+logs/*.log-*
 logs/*.log.*
 logs/*.gz
 

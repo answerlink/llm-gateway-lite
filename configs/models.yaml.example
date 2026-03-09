@@ -10,11 +10,13 @@ models:
       openai: "gpt-3.5-turbo"
       openrouter: "openai/gpt-3.5-turbo"
       gemini: "gemini-3.0-flash"
+      lark-code-plan: "openai/gpt-3.5-turbo"
     policy:
       allow_providers:
+        - "lark-code-plan"
         - "openai"
         - "openrouter"
-      default_provider: "openai"
+      default_provider: "lark-code-plan"
 
   gpt4o-mini:
     aliases:

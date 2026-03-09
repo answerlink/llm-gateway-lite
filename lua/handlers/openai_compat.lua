@@ -11,6 +11,14 @@ local auth = require('core.auth')
 
 local _M = {}
 
+local function safe_json_encode(obj)
+  local ok, encoded = pcall(cjson.encode, obj)
+  if ok then
+    return encoded
+  end
+  return '{}'
+end
+
 local function format_timestamp()
   local now = ngx.now()
   local sec = math.floor(now)
@@ -188,6 +196,24 @@ local function classify_error(status, err)
   return nil
 end
 
+local function inject_channel_to_json_response(raw_body, channel)
+  if type(raw_body) ~= 'string' or raw_body == '' or not channel or channel == '' then
+    return raw_body
+  end
+
+  local body_obj = cjson.decode(raw_body)
+  if type(body_obj) ~= 'table' then
+    return raw_body
+  end
+
+  body_obj.channel = channel
+  local encoded = cjson.encode(body_obj)
+  if not encoded then
+    return raw_body
+  end
+  return encoded
+end
+
 local function should_retry(status, err)
   if err then
     return true
@@ -267,10 +293,7 @@ function _M.handle(endpoint_key)
   ngx.ctx.input_model = input_model
   ngx.ctx.std_model = std_model
 
-  local select_opts = nil
-  if body.tools or body.tool_calls or body.functions or body.function_call then
-    select_opts = { prefer_provider = 'openrouter' }
-  end
+  local select_opts = { prefer_provider = 'lark-code-plan' }
 
   local provider, provider_model, select_err = router.select_provider(cfg, std_model, select_opts)
   if not provider then
@@ -279,6 +302,25 @@ function _M.handle(endpoint_key)
       return errors.unavailable('no provider available')
     end
     return errors.unavailable('provider selection failed')
+  end
+
+  -- 对 minimax-m2.5 增加选路可观测性：默认应优先 lark-code-plan，若未命中则打印 key 可用性。
+  if std_model == 'minimax-m2.5' and provider.name ~= 'lark-code-plan' then
+    local prefer = cfg.providers and cfg.providers['lark-code-plan'] or nil
+    local prefer_info = keypool.inspect_provider(prefer)
+    local selected_info = keypool.inspect_provider(provider)
+    ngx.log(
+      ngx.WARN,
+      '[', format_timestamp(), '] [routing_debug] ',
+      safe_json_encode({
+        event = 'prefer_provider_skipped',
+        model = std_model,
+        prefer_provider = 'lark-code-plan',
+        selected_provider = provider.name,
+        prefer_provider_keys = prefer_info,
+        selected_provider_keys = selected_info,
+      })
+    )
   end
 
   local key = keypool.pick_key(provider)
@@ -444,7 +486,7 @@ function _M.handle(endpoint_key)
   observe.maybe_expose_selection(final_provider, final_key)
 
   ngx.status = res.status
-  ngx.say(res.body or '')
+  ngx.say(inject_channel_to_json_response(res.body or '', final_provider.name))
   return ngx.exit(res.status)
 end
 

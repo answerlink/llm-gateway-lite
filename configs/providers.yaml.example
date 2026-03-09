@@ -44,6 +44,24 @@ providers:
     weight: 2
     timeout_ms: 90000
 
+  lark-code-plan:
+    type: openai_compat
+    base_url: "https://openrouter.ai"
+    endpoints:
+      chat_completions: "/api/v1/chat/completions"
+    auth:
+      mode: "bearer"
+      header: "Authorization"
+      prefix: "Bearer "
+    headers:
+      "HTTP-Referer": "https://your.app"
+      "X-Title": "llm-gateway-lite"
+    keys:
+      - id: "lark-code-plan-key-1"
+        value: "sk-or-v1-your-key-here"
+    weight: 6
+    timeout_ms: 90000
+
   gemini:
     type: openai_compat
     base_url: "https://generativelanguage.googleapis.com"

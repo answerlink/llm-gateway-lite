@@ -58,4 +58,36 @@ function _M.has_available_key(provider)
   return false
 end
 
+function _M.inspect_provider(provider)
+  local info = {
+    provider = provider and provider.name or nil,
+    total_keys = 0,
+    available_keys = 0,
+    cooldown_keys = {},
+  }
+
+  if not provider or not provider.keys then
+    return info
+  end
+
+  info.total_keys = #provider.keys
+
+  for _, key in ipairs(provider.keys) do
+    if _M.is_key_available(provider, key) then
+      info.available_keys = info.available_keys + 1
+    else
+      local item = { id = key.id }
+      if state and state.ttl then
+        local ttl = state:ttl(cooldown_key(provider, key.id))
+        if ttl and ttl >= 0 then
+          item.ttl = ttl
+        end
+      end
+      table.insert(info.cooldown_keys, item)
+    end
+  end
+
+  return info
+end
+
 return _M
