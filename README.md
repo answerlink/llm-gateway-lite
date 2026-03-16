@@ -217,6 +217,7 @@ configs/
 | `GATEWAY_KEY_COOLDOWN_SEC` | `600` | 失效 Key 冷却时间（秒） |
 | `GATEWAY_EXPOSE_SELECTION` | `0` | 是否在响应头中暴露 Provider 和 Key 信息 |
 | `GATEWAY_AUTH_ENABLED` | `false` | 是否启用客户端鉴权 |
+| `GATEWAY_ADMIN_TOKEN` | 空 | Admin 看板访问令牌（为空则不鉴权） |
 
 ### 热配置重载
 
@@ -229,6 +230,30 @@ vim configs/providers.yaml
 # 等待 5 秒（默认检查间隔）
 # 查看日志确认重载成功
 docker-compose logs -f | grep "config loaded"
+```
+
+### 轻量可视化看板（内置）
+
+- 统计接口：`/admin/stats?window=60`
+- 资源目录接口：`/admin/catalog`
+- 可视化页面：
+  - 概览：`/admin/dashboard`
+  - 模型与渠道：`/admin/dashboard/topology`
+- 统计维度：总调用、成功/失败、2xx/4xx/5xx、平均延迟、按分钟趋势
+- 数据存储：内存（`ngx.shared_dict`），重启后清零
+
+如果配置了 `GATEWAY_ADMIN_TOKEN`，访问时需要携带：
+
+```bash
+# JSON 统计
+curl "http://localhost:13030/admin/stats?window=60&admin_token=your-token"
+
+# JSON 资源目录
+curl "http://localhost:13030/admin/catalog?admin_token=your-token"
+
+# 浏览器页面
+http://localhost:13030/admin/dashboard?admin_token=your-token
+http://localhost:13030/admin/dashboard/topology?admin_token=your-token
 ```
 
 ---

@@ -1,5 +1,6 @@
 local cjson = require('cjson.safe')
 local runtime = require('config.runtime')
+local stats = require('core.stats')
 
 local _M = {}
 
@@ -86,12 +87,14 @@ function _M.log_request()
   local provider = ctx.provider
   local provider_model = ctx.provider_model
   local input_model = ctx.input_model
+  local key_id = ctx.key_id
   
   if is_stream and not request_id then
     request_id = ngx.var.stream_request_id ~= "" and ngx.var.stream_request_id or nil
     provider = ngx.var.stream_provider ~= "" and ngx.var.stream_provider or nil
     provider_model = ngx.var.stream_provider_model ~= "" and ngx.var.stream_provider_model or nil
     input_model = ngx.var.stream_input_model ~= "" and ngx.var.stream_input_model or nil
+    key_id = ngx.var.stream_key_id ~= "" and ngx.var.stream_key_id or nil
   end
 
   local entry = {
@@ -100,12 +103,17 @@ function _M.log_request()
     input_model = input_model,
     std_model = ctx.std_model or input_model,
     provider = provider,
+    key_id = key_id,
     provider_model = provider_model,
     upstream_status = status_num or upstream_status,
     latency_ms = latency_ms,
     stream = is_stream,
     error_type = ctx.error_type or classify_status(status_num),
   }
+
+  if not ctx.skip_stats then
+    stats.record(entry)
+  end
 
   local line = cjson.encode(entry)
   if not line then

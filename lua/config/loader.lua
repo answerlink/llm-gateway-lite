@@ -166,6 +166,7 @@ local function normalize_config(cfg)
             prefix = auth.prefix or 'Bearer ',
           },
           headers = provider.headers or {},
+          request_defaults = provider.request_defaults or {},
           weight = tonumber(provider.weight) or 1,
           timeout_ms = tonumber(provider.timeout_ms) or 60000,
           ssl_verify = provider.ssl_verify,

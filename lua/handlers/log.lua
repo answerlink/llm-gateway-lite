@@ -1,5 +1,7 @@
 local observe = require('core.observe')
 local cjson = require('cjson.safe')
+local runtime = require('config.runtime')
+local keypool = require('core.keypool')
 
 local function format_timestamp()
   local now = ngx.now()
@@ -11,7 +13,9 @@ end
 -- 记录流式请求的错误（简化版本，因为 ngx.exec 后 ngx.ctx 被重置）
 local function log_stream_error()
   local ctx = ngx.ctx or {}
-  local is_stream = ctx.stream == true or ngx.var.is_stream == "true"
+  -- 仅保留旧版 ngx.exec('@proxy_stream') 路径的日志兜底。
+  -- 新版流式首包前重试由 openai_compat.lua 内部处理并记录。
+  local is_stream = ngx.var.is_stream == "true"
   
   -- 只记录流式请求的非 200 响应
   if not is_stream then
@@ -31,12 +35,25 @@ local function log_stream_error()
   local provider = ctx.provider
   local provider_model = ctx.provider_model
   local input_model = ctx.input_model
+  local key_id = ctx.key_id
   
   if not request_id then
     request_id = ngx.var.stream_request_id ~= "" and ngx.var.stream_request_id or nil
     provider = ngx.var.stream_provider ~= "" and ngx.var.stream_provider or nil
     provider_model = ngx.var.stream_provider_model ~= "" and ngx.var.stream_provider_model or nil
     input_model = ngx.var.stream_input_model ~= "" and ngx.var.stream_input_model or nil
+    key_id = ngx.var.stream_key_id ~= "" and ngx.var.stream_key_id or nil
+  end
+
+  if key_id and provider and (status_num == 401 or status_num == 402 or status_num == 403 or status_num == 429) then
+    local cfg = runtime.get_config()
+    local provider_cfg = cfg and cfg.providers and cfg.providers[provider] or nil
+    if provider_cfg then
+      keypool.mark_key_cooldown(provider_cfg, key_id, runtime.key_cooldown_sec, {
+        source = 'stream_log',
+        status = status_num,
+      })
+    end
   end
   
   -- 流式请求由于使用 ngx.exec('@proxy_stream')，无法在 log 阶段获取原始请求体
@@ -48,6 +65,7 @@ local function log_stream_error()
     request_id = request_id,
     provider = provider,
     provider_model = provider_model,
+    key_id = key_id,
     input_model = input_model,
     response = {
       status = status_num,

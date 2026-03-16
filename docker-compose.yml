@@ -9,6 +9,7 @@ services:
       - GATEWAY_CONFIG_DIR=/etc/llm-gateway/conf.d
       - TZ=Asia/Shanghai
       - GATEWAY_AUTH_ENABLED=false  # 是否启用客户端鉴权
+      - GATEWAY_KEY_COOLDOWN_SEC=120  # Key 超限/鉴权失败冷却 2 分钟
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
@@ -22,9 +23,17 @@ services:
       - ./lua/core/auth.lua:/app/lua/core/auth.lua:ro
       - ./lua/core/http_client.lua:/app/lua/core/http_client.lua:ro
       - ./lua/core/observe.lua:/app/lua/core/observe.lua:ro
+      - ./lua/core/router.lua:/app/lua/core/router.lua:ro
+      - ./lua/core/keypool.lua:/app/lua/core/keypool.lua:ro
+      - ./lua/core/stats.lua:/app/lua/core/stats.lua:ro
+      - ./lua/core/admin_auth.lua:/app/lua/core/admin_auth.lua:ro
       - ./lua/handlers/openai_compat.lua:/app/lua/handlers/openai_compat.lua:ro
       - ./lua/handlers/models.lua:/app/lua/handlers/models.lua:ro
       - ./lua/handlers/log.lua:/app/lua/handlers/log.lua:ro
+      - ./lua/handlers/admin_stats.lua:/app/lua/handlers/admin_stats.lua:ro
+      - ./lua/handlers/admin_dashboard.lua:/app/lua/handlers/admin_dashboard.lua:ro
+      - ./lua/handlers/admin_catalog.lua:/app/lua/handlers/admin_catalog.lua:ro
+      - ./lua/handlers/admin_topology.lua:/app/lua/handlers/admin_topology.lua:ro
     restart: unless-stopped
     logging:
       driver: "json-file"

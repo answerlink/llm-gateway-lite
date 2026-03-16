@@ -33,6 +33,9 @@ function _M.validate(cfg)
     if provider.keys ~= nil and type(provider.keys) ~= 'table' then
       add_error(errors, 'provider ' .. name .. ' keys must be a list')
     end
+    if provider.request_defaults ~= nil and type(provider.request_defaults) ~= 'table' then
+      add_error(errors, 'provider ' .. name .. ' request_defaults must be a table')
+    end
   end
 
   for name, model in pairs(cfg.models or {}) do

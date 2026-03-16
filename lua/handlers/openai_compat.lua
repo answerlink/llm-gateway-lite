@@ -159,12 +159,6 @@ local function build_headers(provider, key, request_id)
   return headers
 end
 
-local function apply_headers(headers)
-  for name, value in pairs(headers) do
-    ngx.req.set_header(name, value)
-  end
-end
-
 local function copy_response_headers(headers)
   for name, value in pairs(headers or {}) do
     local key = name:lower()
@@ -214,18 +208,138 @@ local function inject_channel_to_json_response(raw_body, channel)
   return encoded
 end
 
-local function should_retry(status, err)
+local function deep_copy(value)
+  if type(value) ~= 'table' then
+    return value
+  end
+  local out = {}
+  for k, v in pairs(value) do
+    out[k] = deep_copy(v)
+  end
+  return out
+end
+
+local function merge_defaults_into_body(body, defaults)
+  for key, default_value in pairs(defaults) do
+    if key ~= 'model' then
+      local current_value = body[key]
+      if current_value == nil then
+        body[key] = deep_copy(default_value)
+      elseif type(current_value) == 'table' and type(default_value) == 'table' then
+        merge_defaults_into_body(current_value, default_value)
+      end
+    end
+  end
+end
+
+local function apply_provider_request_defaults(body, provider)
+  if type(body) ~= 'table' or type(provider) ~= 'table' then
+    return
+  end
+  local defaults = provider.request_defaults
+  if type(defaults) ~= 'table' then
+    return
+  end
+  merge_defaults_into_body(body, defaults)
+end
+
+local function extract_error_signal(res)
+  if not res or type(res.body) ~= 'string' or res.body == '' then
+    return ''
+  end
+
+  local decoded = cjson.decode(res.body)
+  if type(decoded) ~= 'table' then
+    return string.lower(res.body)
+  end
+
+  local parts = {}
+  local function push(v)
+    if type(v) == 'string' and v ~= '' then
+      table.insert(parts, string.lower(v))
+    end
+  end
+
+  push(decoded.code)
+  push(decoded.type)
+  push(decoded.message)
+
+  if type(decoded.error) == 'table' then
+    push(decoded.error.code)
+    push(decoded.error.type)
+    push(decoded.error.message)
+    push(decoded.error.param)
+  elseif type(decoded.error) == 'string' then
+    push(decoded.error)
+  end
+
+  if type(decoded.detail) == 'string' then
+    push(decoded.detail)
+  end
+
+  return table.concat(parts, ' ')
+end
+
+local function should_cooldown_key(status, res, err)
+  if err then
+    return false
+  end
+  if not status then
+    return false
+  end
+  if status == 401 or status == 402 or status == 403 or status == 429 then
+    return true
+  end
+  if status ~= 400 then
+    return false
+  end
+
+  local signal = extract_error_signal(res)
+  if signal == '' then
+    return false
+  end
+
+  local patterns = {
+    'insufficient_quota',
+    'rate limit',
+    'too many requests',
+    'quota exceeded',
+    'exceeded your current quota',
+    'billing',
+    'credit',
+    'invalid api key',
+    'api key',
+    'authentication',
+    'unauthorized',
+    'token',
+    '限流',
+    '配额',
+    '超限',
+    '余额',
+    '欠费',
+  }
+  for _, pattern in ipairs(patterns) do
+    if signal:find(pattern, 1, true) then
+      return true
+    end
+  end
+
+  return false
+end
+
+local function should_retry(res, err)
   if err then
     return true
   end
-  if not status then
+  if not res or not res.status then
     return true
   end
-  if status == 401 or status == 403 or status == 429 then
+  local status = res.status
+  if status == 401 or status == 402 or status == 403 or status == 408 or status == 409 or status == 425 or status == 429 then
     return true
   end
   if status == 400 then
-    return true
+    return should_cooldown_key(status, res, err)
   end
   if status >= 500 and status <= 599 then
     return true
@@ -247,6 +361,60 @@ local function do_request(provider, key, endpoint, body_json, request_id)
     timeout_ms = provider.timeout_ms,
     ssl_verify = provider.ssl_verify,
   })
+end
+
+local function relay_stream_response(stream_res)
+  if not stream_res then
+    return nil, 'missing stream response'
+  end
+
+  while true do
+    local chunk, chunk_err = stream_res.read_chunk()
+    if chunk_err then
+      return nil, chunk_err
+    end
+    if not chunk then
+      return true
+    end
+    local ok, print_err = ngx.print(chunk)
+    if not ok then
+      return nil, print_err or 'failed to write chunk'
+    end
+    local ok_flush, flush_err = ngx.flush(true)
+    if not ok_flush then
+      return nil, flush_err or 'failed to flush chunk'
+    end
+  end
+end
+
+local function pick_retry_target(cfg, std_model, endpoint_key, current_provider, current_model, attempted_keys_by_provider, exhausted_providers)
+  local current_attempts = attempted_keys_by_provider[current_provider.name] or {}
+  local retry_key = keypool.pick_key(current_provider, { exclude_key_ids = current_attempts })
+  if retry_key then
+    return current_provider, current_model, retry_key
+  end
+
+  exhausted_providers[current_provider.name] = true
+
+  local switches = 0
+  while switches < 16 do
+    switches = switches + 1
+    local alt_provider, alt_model = router.select_provider(cfg, std_model, { exclude_providers = exhausted_providers })
+    if not alt_provider then
+      return nil, nil, nil
+    end
+    local endpoint = alt_provider.endpoints and alt_provider.endpoints[endpoint_key] or nil
+    if endpoint then
+      local alt_attempts = attempted_keys_by_provider[alt_provider.name] or {}
+      local alt_key = keypool.pick_key(alt_provider, { exclude_key_ids = alt_attempts })
+      if alt_key then
+        return alt_provider, alt_model, alt_key
+      end
+    end
+    exhausted_providers[alt_provider.name] = true
+  end
+
+  return nil, nil, nil
 end
 
 function _M.handle(endpoint_key)
@@ -284,6 +452,12 @@ function _M.handle(endpoint_key)
     return errors.bad_request('missing model')
   end
 
+  local requested_provider = nil
+  if type(body.provider) == 'string' and body.provider ~= '' then
+    requested_provider = body.provider
+  end
+  body.provider = nil
+
   local std_model = normalize.to_standard(cfg, input_model)
   if not std_model then
     ngx.ctx.error_type = 'invalid_model'
@@ -293,7 +467,7 @@ function _M.handle(endpoint_key)
   ngx.ctx.input_model = input_model
   ngx.ctx.std_model = std_model
 
-  local select_opts = { prefer_provider = 'lark-code-plan' }
+  local select_opts = { prefer_provider = requested_provider or 'lark-code-plan' }
 
   local provider, provider_model, select_err = router.select_provider(cfg, std_model, select_opts)
   if not provider then
@@ -335,8 +509,10 @@ function _M.handle(endpoint_key)
     return errors.unavailable('provider endpoint not configured')
   end
 
-  body.model = provider_model
-  local body_json, encode_err = rewrite.encode_body(body)
+  local stream_body = deep_copy(body)
+  apply_provider_request_defaults(stream_body, provider)
+  stream_body.model = provider_model
+  local body_json, encode_err = rewrite.encode_body(stream_body)
   if not body_json then
     ngx.ctx.error_type = 'invalid_request'
     return errors.bad_request('failed to encode body: ' .. tostring(encode_err))
@@ -346,117 +522,241 @@ function _M.handle(endpoint_key)
   ngx.ctx.stream = is_stream
 
   if is_stream then
-    ngx.ctx.provider = provider.name
-    ngx.ctx.provider_model = provider_model
-    ngx.ctx.key_id = key.id
+    local start_time = ngx.now()
+    local stream_res, req_err = nil, nil
+    local final_provider = provider
+    local final_key = key
+    local final_model = provider_model
+    local final_endpoint = endpoint
+    local attempted_keys_by_provider = {}
+    local exhausted_providers = {}
+    local max_attempts = 16
+    local attempt = 0
+    local last_res = nil
 
-    local headers = build_headers(provider, key, ngx.ctx.request_id)
-    apply_headers(headers)
+    while attempt < max_attempts do
+      attempt = attempt + 1
+      final_provider = provider
+      final_key = key
+      final_model = provider_model
+      final_endpoint = provider.endpoints and provider.endpoints[endpoint_key] or nil
 
-    ngx.req.set_body_data(body_json)
-    ngx.req.set_header('Content-Length', #body_json)
+      if not final_endpoint then
+        ngx.ctx.error_type = 'config_error'
+        return errors.unavailable('provider endpoint not configured')
+      end
 
-    observe.maybe_expose_selection(provider, key)
-    local upstream_url = join_url(provider.base_url, endpoint)
-    log_upstream_request(provider, upstream_url, headers, body_json)
-    ngx.var.upstream_url = upstream_url
-    ngx.var.upstream_host = provider.host
-    ngx.var.upstream_host_header = provider.host_header
-    ngx.var.is_stream = "true"  -- 使用 Nginx 变量传递流式标志
-    
-    -- 通过 Nginx 变量传递关键信息（ngx.exec 后 ngx.ctx 会被重置）
-    ngx.var.stream_provider = provider.name
-    ngx.var.stream_provider_model = provider_model
-    ngx.var.stream_input_model = std_model
-    ngx.var.stream_request_id = ngx.ctx.request_id or ""
+      attempted_keys_by_provider[provider.name] = attempted_keys_by_provider[provider.name] or {}
+      attempted_keys_by_provider[provider.name][key.id] = true
 
-    return ngx.exec('@proxy_stream')
+      local attempt_body = deep_copy(body)
+      apply_provider_request_defaults(attempt_body, provider)
+      attempt_body.model = provider_model
+      local encoded, body_err = rewrite.encode_body(attempt_body)
+      if not encoded then
+        ngx.ctx.error_type = 'invalid_request'
+        return errors.bad_request('failed to encode body: ' .. tostring(body_err))
+      end
+      body_json = encoded
+
+      local url = join_url(provider.base_url, final_endpoint)
+      local request_headers = build_headers(provider, key, ngx.ctx.request_id)
+      log_upstream_request(provider, url, request_headers, body_json)
+
+      if attempt == 1 then
+        ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] making stream request: provider=', provider.name, ', url=', url, ', model=', provider_model, ', key_id=', key.id, ', ssl_verify=', provider.ssl_verify)
+      else
+        ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] retrying stream with provider=', provider.name, ', url=', url, ', key_id=', key.id, ', attempt=', attempt)
+      end
+
+      stream_res, req_err = http_client.request_stream({
+        url = url,
+        method = 'POST',
+        headers = request_headers,
+        body = body_json,
+        timeout_ms = provider.timeout_ms,
+        ssl_verify = provider.ssl_verify,
+      })
+
+      if not stream_res and req_err then
+        ngx.log(ngx.ERR, '[', format_timestamp(), '] [openai_compat] stream request failed: provider=', provider.name, ', url=', url, ', error=', req_err, ', key_id=', key.id)
+        log_failed_request(provider, url, request_headers, body_json, nil, req_err)
+        last_res = nil
+      elseif stream_res and stream_res.status ~= 200 then
+        local err_body, read_err = stream_res.read_all(256 * 1024)
+        if read_err and read_err ~= 'body exceeds limit' then
+          ngx.log(ngx.WARN, '[', format_timestamp(), '] [openai_compat] failed reading stream error body: provider=', provider.name, ', status=', stream_res.status, ', error=', read_err)
+        end
+        stream_res.close()
+        local res_obj = {
+          status = stream_res.status,
+          headers = stream_res.headers or {},
+          body = err_body or '',
+        }
+        ngx.log(ngx.WARN, '[', format_timestamp(), '] [openai_compat] stream response non-200: provider=', provider.name, ', status=', res_obj.status, ', body_size=', #(res_obj.body or ''))
+        log_failed_request(provider, url, request_headers, body_json, res_obj, nil)
+        last_res = res_obj
+      else
+        ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] stream response ready: provider=', provider.name, ', status=200')
+        break
+      end
+
+      if not should_retry(last_res, req_err) then
+        break
+      end
+
+      if should_cooldown_key(last_res and last_res.status or nil, last_res, req_err) then
+        keypool.mark_key_cooldown(provider, key.id, runtime.key_cooldown_sec, {
+          source = 'stream_retry',
+          status = last_res and last_res.status or nil,
+        })
+      end
+
+      local next_provider, next_model, next_key = pick_retry_target(
+        cfg,
+        std_model,
+        endpoint_key,
+        provider,
+        provider_model,
+        attempted_keys_by_provider,
+        exhausted_providers
+      )
+      if not next_provider then
+        break
+      end
+
+      provider = next_provider
+      provider_model = next_model
+      key = next_key
+    end
+
+    ngx.ctx.latency_ms = math.floor((ngx.now() - start_time) * 1000)
+    ngx.ctx.provider = final_provider.name
+    ngx.ctx.provider_model = final_model
+    ngx.ctx.key_id = final_key.id
+
+    if not stream_res then
+      if not last_res then
+        local error_details = {
+          provider = final_provider.name,
+          url = join_url(final_provider.base_url, final_endpoint or endpoint),
+          key_id = final_key.id,
+          error = req_err or 'unknown error',
+          ssl_verify = final_provider.ssl_verify,
+          timeout_ms = final_provider.timeout_ms,
+        }
+        ngx.log(ngx.ERR, '[', format_timestamp(), '] [openai_compat] stream upstream request failed: ', cjson.encode(error_details))
+        ngx.ctx.error_type = 'upstream_error'
+        ngx.ctx.error_details = error_details
+        return errors.send(502, 'upstream request failed', 'upstream_error')
+      end
+      ngx.ctx.upstream_status = last_res.status
+      ngx.ctx.error_type = classify_error(last_res.status, req_err)
+      copy_response_headers(last_res.headers)
+      observe.maybe_expose_selection(final_provider, final_key)
+      ngx.status = last_res.status
+      ngx.say(inject_channel_to_json_response(last_res.body or '', final_provider.name))
+      return ngx.exit(last_res.status)
+    end
+
+    ngx.ctx.upstream_status = 200
+    ngx.ctx.error_type = nil
+    copy_response_headers(stream_res.headers)
+    ngx.header['X-Accel-Buffering'] = 'no'
+    observe.maybe_expose_selection(final_provider, final_key)
+    ngx.status = 200
+    local relay_ok, relay_err = relay_stream_response(stream_res)
+    stream_res.close()
+    if not relay_ok then
+      ngx.log(ngx.ERR, '[', format_timestamp(), '] [openai_compat] stream relay failed: provider=', final_provider.name, ', key_id=', final_key.id, ', error=', relay_err)
+    end
+    return ngx.exit(200)
   end
 
   local start_time = ngx.now()
-  local url = join_url(provider.base_url, endpoint)
-  local request_headers = build_headers(provider, key, ngx.ctx.request_id)
-  
-  ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] making request: provider=', provider.name, ', url=', url, ', model=', provider_model, ', key_id=', key.id, ', ssl_verify=', provider.ssl_verify)
-  log_upstream_request(provider, url, request_headers, body_json)
-  
-  local res, req_err = do_request(provider, key, endpoint, body_json, ngx.ctx.request_id)
-
-  -- 记录失败请求的详细信息
-  if not res and req_err then
-    ngx.log(ngx.ERR, '[', format_timestamp(), '] [openai_compat] request failed: provider=', provider.name, ', url=', url, ', error=', req_err, ', key_id=', key.id)
-    log_failed_request(provider, url, request_headers, body_json, nil, req_err)
-  elseif res and res.status ~= 200 then
-    -- 非 200 响应也记录详细信息
-    ngx.log(ngx.WARN, '[', format_timestamp(), '] [openai_compat] request response: provider=', provider.name, ', status=', res.status, ', body_size=', #(res.body or ''))
-    log_failed_request(provider, url, request_headers, body_json, res, nil)
-  elseif res then
-    ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] request response: provider=', provider.name, ', status=', res.status, ', body_size=', #(res.body or ''))
-  end
-
+  local res, req_err = nil, nil
   local final_provider = provider
   local final_key = key
   local final_model = provider_model
+  local final_endpoint = endpoint
+  local attempted_keys_by_provider = {}
+  local exhausted_providers = {}
+  local max_attempts = 16
+  local attempt = 0
 
-  if should_retry(res and res.status or nil, req_err) then
-    local retry_provider = nil
-    local retry_key = nil
-    local retry_model = provider_model
+  while attempt < max_attempts do
+    attempt = attempt + 1
+    final_provider = provider
+    final_key = key
+    final_model = provider_model
+    final_endpoint = provider.endpoints and provider.endpoints[endpoint_key] or nil
 
-    if res and (res.status == 401 or res.status == 403 or res.status == 429) then
-      keypool.mark_key_cooldown(provider, key.id, runtime.key_cooldown_sec)
-      retry_provider = provider
-      retry_key = keypool.pick_key(provider, { exclude_key_id = key.id })
-      retry_model = provider_model
+    if not final_endpoint then
+      ngx.ctx.error_type = 'config_error'
+      return errors.unavailable('provider endpoint not configured')
     end
 
-    if not retry_key then
-      local exclude = { [provider.name] = true }
-      local alt_provider, alt_model = router.select_provider(cfg, std_model, { exclude_providers = exclude })
-      if alt_provider then
-        local alt_key = keypool.pick_key(alt_provider)
-        if alt_key then
-          retry_provider = alt_provider
-          retry_key = alt_key
-          retry_model = alt_model
-        end
-      end
+    attempted_keys_by_provider[provider.name] = attempted_keys_by_provider[provider.name] or {}
+    attempted_keys_by_provider[provider.name][key.id] = true
+
+    local attempt_body = deep_copy(body)
+    apply_provider_request_defaults(attempt_body, provider)
+    attempt_body.model = provider_model
+    local encoded, body_err = rewrite.encode_body(attempt_body)
+    if not encoded then
+      ngx.ctx.error_type = 'invalid_request'
+      return errors.bad_request('failed to encode body: ' .. tostring(body_err))
+    end
+    body_json = encoded
+
+    local url = join_url(provider.base_url, final_endpoint)
+    local request_headers = build_headers(provider, key, ngx.ctx.request_id)
+
+    if attempt == 1 then
+      ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] making request: provider=', provider.name, ', url=', url, ', model=', provider_model, ', key_id=', key.id, ', ssl_verify=', provider.ssl_verify)
+    else
+      ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] retrying with provider=', provider.name, ', url=', url, ', key_id=', key.id, ', attempt=', attempt)
+    end
+    log_upstream_request(provider, url, request_headers, body_json)
+    res, req_err = do_request(provider, key, final_endpoint, body_json, ngx.ctx.request_id)
+
+    if not res and req_err then
+      ngx.log(ngx.ERR, '[', format_timestamp(), '] [openai_compat] request failed: provider=', provider.name, ', url=', url, ', error=', req_err, ', key_id=', key.id)
+      log_failed_request(provider, url, request_headers, body_json, nil, req_err)
+    elseif res and res.status ~= 200 then
+      ngx.log(ngx.WARN, '[', format_timestamp(), '] [openai_compat] request response: provider=', provider.name, ', status=', res.status, ', body_size=', #(res.body or ''))
+      log_failed_request(provider, url, request_headers, body_json, res, nil)
+    elseif res then
+      ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] request response: provider=', provider.name, ', status=', res.status, ', body_size=', #(res.body or ''))
     end
 
-    if retry_provider and retry_key then
-      final_provider = retry_provider
-      final_key = retry_key
-      final_model = retry_model
-
-      body.model = final_model
-      local retry_body, retry_err = rewrite.encode_body(body)
-      if not retry_body then
-        ngx.ctx.error_type = 'invalid_request'
-        return errors.bad_request('failed to encode retry body: ' .. tostring(retry_err))
-      end
-      body_json = retry_body
-
-      local retry_endpoint = final_provider.endpoints and final_provider.endpoints[endpoint_key] or nil
-      if not retry_endpoint then
-        ngx.ctx.error_type = 'config_error'
-        return errors.unavailable('retry provider endpoint not configured')
-      end
-
-      local retry_url = join_url(final_provider.base_url, retry_endpoint)
-      local retry_headers = build_headers(final_provider, final_key, ngx.ctx.request_id)
-      
-      ngx.log(ngx.INFO, '[', format_timestamp(), '] [openai_compat] retrying with provider=', final_provider.name, ', url=', retry_url, ', key_id=', final_key.id)
-      log_upstream_request(final_provider, retry_url, retry_headers, body_json)
-      
-      res, req_err = do_request(final_provider, final_key, retry_endpoint, body_json, ngx.ctx.request_id)
-      
-      -- 记录重试失败
-      if not res and req_err then
-        log_failed_request(final_provider, retry_url, retry_headers, body_json, nil, req_err)
-      elseif res and res.status ~= 200 then
-        log_failed_request(final_provider, retry_url, retry_headers, body_json, res, nil)
-      end
+    if not should_retry(res, req_err) then
+      break
     end
+
+    if should_cooldown_key(res and res.status or nil, res, req_err) then
+      keypool.mark_key_cooldown(provider, key.id, runtime.key_cooldown_sec, {
+        source = 'non_stream_retry',
+        status = res and res.status or nil,
+      })
+    end
+
+    local next_provider, next_model, next_key = pick_retry_target(
+      cfg,
+      std_model,
+      endpoint_key,
+      provider,
+      provider_model,
+      attempted_keys_by_provider,
+      exhausted_providers
+    )
+    if not next_provider then
+      break
+    end
+
+    provider = next_provider
+    provider_model = next_model
+    key = next_key
   end
 
   ngx.ctx.latency_ms = math.floor((ngx.now() - start_time) * 1000)
@@ -467,7 +767,7 @@ function _M.handle(endpoint_key)
   if not res then
     local error_details = {
       provider = final_provider.name,
-      url = join_url(final_provider.base_url, endpoint),
+      url = join_url(final_provider.base_url, final_endpoint or endpoint),
       key_id = final_key.id,
       error = req_err or 'unknown error',
       ssl_verify = final_provider.ssl_verify,

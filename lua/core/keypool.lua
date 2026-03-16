@@ -1,4 +1,5 @@
 local _M = {}
+local stats = require('core.stats')
 
 local state = ngx.shared and ngx.shared.gateway_state or nil
 local rr = ngx.shared and ngx.shared.gateway_rr or nil
@@ -8,6 +9,9 @@ local function cooldown_key(provider, key_id)
 end
 
 function _M.is_key_available(provider, key)
+  if not key then
+    return false
+  end
   if not state then
     return true
   end
@@ -15,11 +19,14 @@ function _M.is_key_available(provider, key)
   return value == nil
 end
 
-function _M.mark_key_cooldown(provider, key_id, ttl)
+function _M.mark_key_cooldown(provider, key_id, ttl, opts)
   if not state then
     return
   end
   state:set(cooldown_key(provider, key_id), true, ttl)
+  if provider and provider.name and key_id then
+    stats.record_key_cooldown(provider.name, key_id, ttl, opts)
+  end
 end
 
 function _M.pick_key(provider, opts)
@@ -28,6 +35,7 @@ function _M.pick_key(provider, opts)
   end
 
   local exclude = opts and opts.exclude_key_id or nil
+  local exclude_set = opts and opts.exclude_key_ids or nil
   local count = #provider.keys
   local start = 1
 
@@ -38,7 +46,9 @@ function _M.pick_key(provider, opts)
 
   for i = 0, count - 1 do
     local key = provider.keys[((start + i - 1) % count) + 1]
-    if (not exclude or key.id ~= exclude) and _M.is_key_available(provider, key) then
+    if (not exclude or key.id ~= exclude)
+      and (not exclude_set or exclude_set[key.id] ~= true)
+      and _M.is_key_available(provider, key) then
       return key
     end
   end
@@ -88,6 +98,31 @@ function _M.inspect_provider(provider)
   end
 
   return info
+end
+
+function _M.inspect_provider_keys(provider)
+  local keys = {}
+  if not provider or not provider.keys then
+    return keys
+  end
+
+  for _, key in ipairs(provider.keys) do
+    local available = _M.is_key_available(provider, key)
+    local item = {
+      id = key.id,
+      available = available,
+      cooldown_ttl = 0,
+    }
+    if not available and state and state.ttl then
+      local ttl = state:ttl(cooldown_key(provider, key.id))
+      if ttl and ttl > 0 then
+        item.cooldown_ttl = ttl
+      end
+    end
+    table.insert(keys, item)
+  end
+
+  return keys
 end
 
 return _M
