@@ -2,11 +2,9 @@
 configs/providers.yaml
 configs/models.yaml
 
-# 日志文件
-logs/*.log
-logs/*.log-*
-logs/*.log.*
-logs/*.gz
+# 日志与运行时产物（包含调用明细、历史快照等敏感信息）
+logs/**
+!logs/.gitkeep
 
 # Docker
 .docker/

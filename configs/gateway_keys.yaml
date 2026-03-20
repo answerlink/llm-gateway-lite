@@ -3,18 +3,18 @@ version: 1
 # 网关自己的 API Keys（用于客户端鉴权）
 gateway_keys:
   - key_id: "user-1"
-    key: "sk-gateway-test-key-12345678"
-    tenant_id: "tenant-1"
+    key: "sk-gateway-demo-key-1"
+    tenant_id: "demo-tenant-1"
     enabled: true
-    description: "测试用户1"
+    description: "Demo tenant 1"
     # allowed_models:  # 可选：限制可用模型
     #   - "glm-4.7-flash"
     #   - "minimax-m2.1"
   
   - key_id: "user-2"
-    key: "sk-gateway-prod-key-87654321"
-    tenant_id: "tenant-2"
+    key: "sk-gateway-demo-key-2"
+    tenant_id: "demo-tenant-2"
     enabled: true
-    description: "生产用户2"
+    description: "Demo tenant 2"
   
   # 添加更多 key...

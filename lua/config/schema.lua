@@ -42,6 +42,17 @@ function _M.validate(cfg)
     if type(model.provider_map) ~= 'table' then
       add_error(errors, 'model ' .. name .. ' provider_map must be a table')
     end
+    if model.policy ~= nil and type(model.policy) ~= 'table' then
+      add_error(errors, 'model ' .. name .. ' policy must be a table')
+    end
+    if type(model.policy) == 'table' then
+      if model.policy.default_provider ~= nil and type(model.policy.default_provider) ~= 'string' then
+        add_error(errors, 'model ' .. name .. ' default_provider must be a string')
+      end
+      if model.policy.default_providers ~= nil and type(model.policy.default_providers) ~= 'table' then
+        add_error(errors, 'model ' .. name .. ' default_providers must be a list')
+      end
+    end
   end
 
   if #errors > 0 then

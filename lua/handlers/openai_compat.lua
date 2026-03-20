@@ -399,14 +399,15 @@ local function pick_retry_target(cfg, std_model, endpoint_key, current_provider,
   local switches = 0
   while switches < 16 do
     switches = switches + 1
-    local alt_provider, alt_model = router.select_provider(cfg, std_model, { exclude_providers = exhausted_providers })
+    local alt_provider, alt_model, alt_key = router.select_provider_with_key(cfg, std_model, {
+      exclude_providers = exhausted_providers,
+      exclude_key_ids_by_provider = attempted_keys_by_provider,
+    })
     if not alt_provider then
       return nil, nil, nil
     end
     local endpoint = alt_provider.endpoints and alt_provider.endpoints[endpoint_key] or nil
     if endpoint then
-      local alt_attempts = attempted_keys_by_provider[alt_provider.name] or {}
-      local alt_key = keypool.pick_key(alt_provider, { exclude_key_ids = alt_attempts })
       if alt_key then
         return alt_provider, alt_model, alt_key
       end
@@ -467,40 +468,18 @@ function _M.handle(endpoint_key)
   ngx.ctx.input_model = input_model
   ngx.ctx.std_model = std_model
 
-  local select_opts = { prefer_provider = requested_provider or 'lark-code-plan' }
+  local select_opts = {}
+  if requested_provider then
+    select_opts.prefer_provider = requested_provider
+  end
 
-  local provider, provider_model, select_err = router.select_provider(cfg, std_model, select_opts)
+  local provider, provider_model, key, select_err = router.select_provider_with_key(cfg, std_model, select_opts)
   if not provider then
     ngx.ctx.error_type = 'no_provider'
     if select_err == 'no_provider_available' then
       return errors.unavailable('no provider available')
     end
     return errors.unavailable('provider selection failed')
-  end
-
-  -- 对 minimax-m2.5 增加选路可观测性：默认应优先 lark-code-plan，若未命中则打印 key 可用性。
-  if std_model == 'minimax-m2.5' and provider.name ~= 'lark-code-plan' then
-    local prefer = cfg.providers and cfg.providers['lark-code-plan'] or nil
-    local prefer_info = keypool.inspect_provider(prefer)
-    local selected_info = keypool.inspect_provider(provider)
-    ngx.log(
-      ngx.WARN,
-      '[', format_timestamp(), '] [routing_debug] ',
-      safe_json_encode({
-        event = 'prefer_provider_skipped',
-        model = std_model,
-        prefer_provider = 'lark-code-plan',
-        selected_provider = provider.name,
-        prefer_provider_keys = prefer_info,
-        selected_provider_keys = selected_info,
-      })
-    )
-  end
-
-  local key = keypool.pick_key(provider)
-  if not key then
-    ngx.ctx.error_type = 'no_key'
-    return errors.unavailable('no key available for provider')
   end
 
   local endpoint = provider.endpoints and provider.endpoints[endpoint_key] or nil

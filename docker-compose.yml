@@ -7,17 +7,21 @@ services:
       - '13030:8080'
     environment:
       - GATEWAY_CONFIG_DIR=/etc/llm-gateway/conf.d
+      - GATEWAY_CONFIG_EDITABLE=true
+      - GATEWAY_CONFIG_VERSION_DIR=/var/log/llm-gateway/config-versions
+      - GATEWAY_STATS_SNAPSHOT_PATH=/var/log/llm-gateway/stats-snapshot.json
+      - GATEWAY_STATS_SNAPSHOT_INTERVAL_SEC=10
       - TZ=Asia/Shanghai
-      - GATEWAY_AUTH_ENABLED=false  # 是否启用客户端鉴权
+      - GATEWAY_AUTH_ENABLED=true  # 是否启用客户端鉴权
+      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:-change-me-admin-token}
       - GATEWAY_KEY_COOLDOWN_SEC=120  # Key 超限/鉴权失败冷却 2 分钟
     volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
-      - ./configs:/etc/llm-gateway/conf.d:ro
+      - ./configs:/etc/llm-gateway/conf.d
       - ./logs:/var/log/llm-gateway
       - ./docker/entrypoint.sh:/app/entrypoint.sh:ro
       - ./nginx/nginx.conf:/app/nginx/nginx.conf:ro
       - ./nginx/conf.d/gateway.conf:/app/nginx/conf.d/gateway.conf:ro
+      - ./lua/init.lua:/app/lua/init.lua:ro
       - ./lua/config/yaml.lua:/app/lua/config/yaml.lua:ro
       - ./lua/config/loader.lua:/app/lua/config/loader.lua:ro
       - ./lua/core/auth.lua:/app/lua/core/auth.lua:ro
@@ -27,6 +31,7 @@ services:
       - ./lua/core/keypool.lua:/app/lua/core/keypool.lua:ro
       - ./lua/core/stats.lua:/app/lua/core/stats.lua:ro
       - ./lua/core/admin_auth.lua:/app/lua/core/admin_auth.lua:ro
+      - ./lua/core/config_manager.lua:/app/lua/core/config_manager.lua:ro
       - ./lua/handlers/openai_compat.lua:/app/lua/handlers/openai_compat.lua:ro
       - ./lua/handlers/models.lua:/app/lua/handlers/models.lua:ro
       - ./lua/handlers/log.lua:/app/lua/handlers/log.lua:ro
@@ -34,6 +39,9 @@ services:
       - ./lua/handlers/admin_dashboard.lua:/app/lua/handlers/admin_dashboard.lua:ro
       - ./lua/handlers/admin_catalog.lua:/app/lua/handlers/admin_catalog.lua:ro
       - ./lua/handlers/admin_topology.lua:/app/lua/handlers/admin_topology.lua:ro
+      - ./lua/handlers/admin_config_api.lua:/app/lua/handlers/admin_config_api.lua:ro
+      - ./lua/handlers/admin_config_page.lua:/app/lua/handlers/admin_config_page.lua:ro
+      - ./lua/handlers/admin_login.lua:/app/lua/handlers/admin_login.lua:ro
     restart: unless-stopped
     logging:
       driver: "json-file"

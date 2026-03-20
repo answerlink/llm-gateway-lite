@@ -8,6 +8,12 @@ local MINUTE_PREFIX = PREFIX .. 'm:'
 local MINUTE_TTL = 172800 -- 48h
 local COOLDOWN_EVENT_TTL = 604800 -- 7d
 local MAX_COOLDOWN_EVENTS = 200
+local SNAPSHOT_PATH = os.getenv('GATEWAY_STATS_SNAPSHOT_PATH') or '/var/log/llm-gateway/stats-snapshot.json'
+local SNAPSHOT_INTERVAL_SEC = tonumber(os.getenv('GATEWAY_STATS_SNAPSHOT_INTERVAL_SEC') or '10') or 10
+local SNAPSHOT_VERSION = 1
+local SNAPSHOT_LOCK_KEY = PREFIX .. 'snapshot_lock'
+local SNAPSHOT_RESTORED_KEY = PREFIX .. 'snapshot_restored'
+local SNAPSHOT_LOCK_TTL = 15
 
 local function incr(key, delta, init, ttl)
   local _, err = DICT:incr(key, delta, init or 0, ttl)
@@ -26,6 +32,10 @@ end
 
 local function minute_key(minute, suffix)
   return MINUTE_PREFIX .. tostring(minute) .. ':' .. suffix
+end
+
+local function escape_lua_pattern(str)
+  return (str:gsub('([%^%$%(%)%%%.%[%]%*%+%-%?])', '%%%1'))
 end
 
 local function status_bucket(status_num)
@@ -73,6 +83,176 @@ local function set_scalar(key, value, ttl)
   end
 end
 
+local function read_file(path)
+  local f, err = io.open(path, 'rb')
+  if not f then
+    return nil, err
+  end
+  local data = f:read('*a')
+  f:close()
+  return data
+end
+
+local function write_file(path, content)
+  local tmp = path .. '.tmp'
+  local f, err = io.open(tmp, 'wb')
+  if not f then
+    return nil, err
+  end
+  f:write(content or '')
+  f:close()
+  local ok, rename_err = os.rename(tmp, path)
+  if not ok then
+    os.remove(tmp)
+    return nil, rename_err
+  end
+  return true
+end
+
+local function should_snapshot_key(key)
+  if type(key) ~= 'string' then
+    return false
+  end
+  if key:sub(1, #PREFIX) == PREFIX then
+    return true
+  end
+  return key:sub(1, 9) == 'cooldown:'
+end
+
+local function clear_snapshot_keys()
+  local keys = DICT:get_keys(0)
+  for _, key in ipairs(keys) do
+    if should_snapshot_key(key) then
+      DICT:delete(key)
+    end
+  end
+end
+
+local function build_snapshot_payload()
+  local entries = {}
+  local keys = DICT:get_keys(0)
+  for _, key in ipairs(keys) do
+    if should_snapshot_key(key) and key ~= SNAPSHOT_LOCK_KEY and key ~= SNAPSHOT_RESTORED_KEY then
+      local value = DICT:get(key)
+      if value ~= nil then
+        local item = {
+          key = key,
+          value = value,
+          value_type = type(value),
+        }
+        local ttl = DICT:ttl(key)
+        if ttl and ttl > 0 then
+          item.ttl = math.floor(ttl)
+        end
+        table.insert(entries, item)
+      end
+    end
+  end
+  return {
+    version = SNAPSHOT_VERSION,
+    saved_at = math.floor(ngx.now()),
+    entries = entries,
+  }
+end
+
+local function restore_snapshot_payload(payload)
+  if type(payload) ~= 'table' then
+    return false, 'invalid snapshot payload'
+  end
+  if tonumber(payload.version) ~= SNAPSHOT_VERSION then
+    return false, 'unsupported snapshot version'
+  end
+  if type(payload.entries) ~= 'table' then
+    return false, 'invalid snapshot entries'
+  end
+
+  clear_snapshot_keys()
+  for _, item in ipairs(payload.entries) do
+    if type(item) == 'table' and type(item.key) == 'string' then
+      local val = item.value
+      local ttl = tonumber(item.ttl)
+      local ok, err
+      if ttl and ttl > 0 then
+        ok, err = DICT:set(item.key, val, ttl)
+      else
+        ok, err = DICT:set(item.key, val)
+      end
+      if not ok then
+        ngx.log(ngx.WARN, '[stats] restore set failed key=', item.key, ', err=', err)
+      end
+    end
+  end
+  return true, nil
+end
+
+function _M.flush_snapshot()
+  if not DICT then
+    return false, 'dict not ready'
+  end
+  local payload = build_snapshot_payload()
+  local content = cjson.encode(payload)
+  if not content then
+    return false, 'encode snapshot failed'
+  end
+  local ok, err = write_file(SNAPSHOT_PATH, content)
+  if not ok then
+    return false, 'write snapshot failed: ' .. tostring(err)
+  end
+  return true, nil
+end
+
+function _M.restore_snapshot()
+  if not DICT then
+    return false, 'dict not ready'
+  end
+  local data, err = read_file(SNAPSHOT_PATH)
+  if not data or data == '' then
+    return false, 'snapshot not found: ' .. tostring(err or 'empty')
+  end
+  local payload = cjson.decode(data)
+  if not payload then
+    return false, 'decode snapshot failed'
+  end
+  return restore_snapshot_payload(payload)
+end
+
+function _M.setup_snapshot_worker()
+  if not DICT or not ngx.worker or ngx.worker.id() ~= 0 then
+    return
+  end
+  if DICT:get(SNAPSHOT_RESTORED_KEY) ~= true then
+    local ok, err = _M.restore_snapshot()
+    if ok then
+      ngx.log(ngx.INFO, '[stats] snapshot restored from ', SNAPSHOT_PATH)
+    else
+      ngx.log(ngx.INFO, '[stats] snapshot restore skipped: ', err or 'unknown')
+    end
+    DICT:set(SNAPSHOT_RESTORED_KEY, true)
+  end
+
+  local function flush_timer(premature)
+    if premature then
+      return
+    end
+    local lock_ok, lock_err = DICT:add(SNAPSHOT_LOCK_KEY, true, SNAPSHOT_LOCK_TTL)
+    if not lock_ok then
+      if lock_err ~= 'exists' then
+        ngx.log(ngx.WARN, '[stats] snapshot lock error: ', lock_err)
+      end
+      return
+    end
+    local ok, err = _M.flush_snapshot()
+    if not ok then
+      ngx.log(ngx.WARN, '[stats] snapshot flush failed: ', err or 'unknown')
+    end
+  end
+
+  local ok, timer_err = ngx.timer.every(SNAPSHOT_INTERVAL_SEC, flush_timer)
+  if not ok then
+    ngx.log(ngx.ERR, '[stats] failed to start snapshot timer: ', timer_err or 'unknown')
+  end
+end
+
 function _M.record(entry)
   if type(entry) ~= 'table' then
     return
@@ -108,15 +288,19 @@ function _M.record(entry)
   local err_type = sanitize_key(entry.error_type)
   if err_type then
     incr(PREFIX .. 'error:' .. err_type, 1, 0)
+    incr(minute_key(minute, 'error:' .. err_type), 1, 0, MINUTE_TTL)
   end
 
   local provider = sanitize_key(entry.provider)
   if provider then
     incr(PREFIX .. 'provider:' .. provider, 1, 0)
+    incr(minute_key(minute, 'provider:' .. provider), 1, 0, MINUTE_TTL)
     if is_success then
       incr(PREFIX .. 'provider_success:' .. provider, 1, 0)
+      incr(minute_key(minute, 'provider_success:' .. provider), 1, 0, MINUTE_TTL)
     else
       incr(PREFIX .. 'provider_failure:' .. provider, 1, 0)
+      incr(minute_key(minute, 'provider_failure:' .. provider), 1, 0, MINUTE_TTL)
     end
   end
 
@@ -211,6 +395,26 @@ local function collect_prefix(prefix)
       local value = DICT:get(key)
       if type(value) == 'number' then
         out[key:sub(#prefix + 1)] = value
+      end
+    end
+  end
+  return out
+end
+
+local function collect_window_prefix(metric_prefix, window, now_minute)
+  local out = {}
+  local start_minute = now_minute - window + 1
+  local keys = DICT:get_keys(0)
+  local pattern = '^' .. escape_lua_pattern(MINUTE_PREFIX) .. '(%d+):' .. escape_lua_pattern(metric_prefix) .. '(.+)$'
+  for _, key in ipairs(keys) do
+    local minute_str, name = key:match(pattern)
+    if minute_str and name then
+      local minute = tonumber(minute_str) or 0
+      if minute >= start_minute and minute <= now_minute then
+        local value = DICT:get(key)
+        if type(value) == 'number' then
+          out[name] = (out[name] or 0) + value
+        end
       end
     end
   end
@@ -371,6 +575,26 @@ function _M.snapshot(window_minutes)
     by_provider_failure = collect_prefix(PREFIX .. 'provider_failure:'),
   }
 
+  local window_totals = {
+    total = 0,
+    success = 0,
+    failure = 0,
+    latency_sum_ms = 0,
+    latency_count = 0,
+    by_status = {
+      ['2xx'] = 0,
+      ['3xx'] = 0,
+      ['4xx'] = 0,
+      ['5xx'] = 0,
+      unknown = 0,
+      other = 0,
+    },
+    by_error_type = collect_window_prefix('error:', window, now_minute),
+    by_provider = collect_window_prefix('provider:', window, now_minute),
+    by_provider_success = collect_window_prefix('provider_success:', window, now_minute),
+    by_provider_failure = collect_window_prefix('provider_failure:', window, now_minute),
+  }
+
   local avg_latency_ms = 0
   if totals.latency_count > 0 then
     avg_latency_ms = math.floor((totals.latency_sum_ms / totals.latency_count) * 100) / 100
@@ -405,6 +629,28 @@ function _M.snapshot(window_minutes)
       status_4xx = get_number(minute_key(m, 'status:4xx')),
       status_5xx = get_number(minute_key(m, 'status:5xx')),
     })
+    window_totals.total = window_totals.total + minute_total
+    window_totals.success = window_totals.success + minute_success
+    window_totals.failure = window_totals.failure + minute_failure
+    window_totals.latency_count = window_totals.latency_count + minute_latency_count
+    window_totals.latency_sum_ms = window_totals.latency_sum_ms + minute_latency_sum_ms
+    window_totals.by_status['2xx'] = window_totals.by_status['2xx'] + get_number(minute_key(m, 'status:2xx'))
+    window_totals.by_status['3xx'] = window_totals.by_status['3xx'] + get_number(minute_key(m, 'status:3xx'))
+    window_totals.by_status['4xx'] = window_totals.by_status['4xx'] + get_number(minute_key(m, 'status:4xx'))
+    window_totals.by_status['5xx'] = window_totals.by_status['5xx'] + get_number(minute_key(m, 'status:5xx'))
+    window_totals.by_status.unknown = window_totals.by_status.unknown + get_number(minute_key(m, 'status:unknown'))
+    window_totals.by_status.other = window_totals.by_status.other + get_number(minute_key(m, 'status:other'))
+  end
+
+  local window_avg_latency_ms = 0
+  if window_totals.latency_count > 0 then
+    window_avg_latency_ms = math.floor((window_totals.latency_sum_ms / window_totals.latency_count) * 100) / 100
+  end
+  window_totals.avg_latency_ms = window_avg_latency_ms
+
+  local window_success_rate = 0
+  if window_totals.total > 0 then
+    window_success_rate = math.floor((window_totals.success / window_totals.total) * 10000) / 100
   end
 
   local key_stats = build_key_stats(window, now_minute)
@@ -414,7 +660,9 @@ function _M.snapshot(window_minutes)
     now = now,
     window_minutes = window,
     totals = totals,
+    window_totals = window_totals,
     success_rate = success_rate,
+    window_success_rate = window_success_rate,
     series = series,
     key_stats = key_stats,
     cooldown_events = cooldown_events,

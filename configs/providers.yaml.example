@@ -44,7 +44,7 @@ providers:
     weight: 2
     timeout_ms: 90000
 
-  lark-code-plan:
+  primary-provider:
     type: openai_compat
     base_url: "https://openrouter.ai"
     endpoints:
@@ -57,7 +57,7 @@ providers:
       "HTTP-Referer": "https://your.app"
       "X-Title": "llm-gateway-lite"
     keys:
-      - id: "lark-code-plan-key-1"
+      - id: "primary-provider-key-1"
         value: "sk-or-v1-your-key-here"
     weight: 6
     timeout_ms: 90000

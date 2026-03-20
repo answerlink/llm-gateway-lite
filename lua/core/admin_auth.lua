@@ -15,6 +15,12 @@ local function unauthorized(message)
   return ngx.exit(401)
 end
 
+local function redirect_to_login()
+  local next_url = ngx.var.request_uri or '/admin/dashboard'
+  local target = '/admin/login?next=' .. ngx.escape_uri(next_url)
+  return ngx.redirect(target, 302)
+end
+
 local function extract_token()
   local headers = ngx.req.get_headers()
   local token = headers['X-Admin-Token'] or headers['x-admin-token']
@@ -48,6 +54,13 @@ function _M.guard()
   if got and got == expected then
     return true
   end
+
+  -- For browser dashboard pages, provide a login entry instead of raw 401 JSON.
+  local uri = ngx.var.uri or ''
+  if ngx.req.get_method() == 'GET' and uri:find('^/admin/dashboard') then
+    return redirect_to_login()
+  end
+
   return unauthorized('invalid admin token')
 end
 

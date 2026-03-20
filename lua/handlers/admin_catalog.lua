@@ -83,6 +83,7 @@ for _, model_name in ipairs(cfg.model_list or {}) do
     id = model_name,
     aliases = model.aliases or {},
     default_provider = model.policy and model.policy.default_provider or nil,
+    default_providers = model.policy and model.policy.default_providers or {},
     allow_providers = allow_providers,
     provider_map = provider_map,
     provider_count = #sorted_keys(model.provider_map or {}),

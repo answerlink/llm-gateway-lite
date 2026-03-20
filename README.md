@@ -119,7 +119,7 @@ models:
       openai: "gpt-3.5-turbo"
       openrouter: "openai/gpt-3.5-turbo"
     policy:
-      default_provider: "lark-code-plan"  # 优先使用 lark-code-plan
+      default_provider: "primary-provider"  # 优先使用 primary-provider
 ```
 
 #### 3️⃣ 启动服务
@@ -291,7 +291,7 @@ models:
       openai: "gpt-3.5-turbo"      # 官方 API（主力）
       openrouter: "openai/gpt-3.5-turbo"  # 第三方（备用）
     policy:
-      default_provider: "lark-code-plan"   # 优先使用 lark-code-plan
+      default_provider: "primary-provider"   # 优先使用 primary-provider
 
 # providers.yaml
 providers:

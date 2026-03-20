@@ -56,6 +56,46 @@ function _M.pick_key(provider, opts)
   return nil
 end
 
+function _M.pick_from_provider_chain(chain_items, opts)
+  if type(chain_items) ~= 'table' or #chain_items == 0 then
+    return nil, nil, nil
+  end
+
+  local exclude_by_provider = opts and opts.exclude_key_ids_by_provider or {}
+  local chain_id = (opts and opts.chain_id) or 'default'
+  local slots = {}
+
+  for _, item in ipairs(chain_items) do
+    local provider = item.provider
+    if provider and type(provider.keys) == 'table' and #provider.keys > 0 then
+      local exclude_set = exclude_by_provider[provider.name] or {}
+      for _, key in ipairs(provider.keys) do
+        if (not exclude_set[key.id]) and _M.is_key_available(provider, key) then
+          table.insert(slots, {
+            provider = provider,
+            key = key,
+            model = item.model,
+          })
+        end
+      end
+    end
+  end
+
+  local count = #slots
+  if count == 0 then
+    return nil, nil, nil
+  end
+
+  local start = 1
+  if rr then
+    local idx = rr:incr('rr:chain:' .. tostring(chain_id), 1, 0)
+    start = (idx % count) + 1
+  end
+
+  local selected = slots[start]
+  return selected.provider, selected.model, selected.key
+end
+
 function _M.has_available_key(provider)
   if not provider or not provider.keys or #provider.keys == 0 then
     return false

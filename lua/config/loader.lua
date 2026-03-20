@@ -211,6 +211,23 @@ local function normalize_config(cfg)
       local aliases = model.aliases or {}
       local policy = model.policy or {}
       local provider_map = model.provider_map or {}
+
+      local default_providers = {}
+      local seen_default = {}
+      if type(policy.default_providers) == 'table' then
+        for _, provider_name in ipairs(policy.default_providers) do
+          if type(provider_name) == 'string' and provider_name ~= '' and not seen_default[provider_name] then
+            table.insert(default_providers, provider_name)
+            seen_default[provider_name] = true
+          end
+        end
+      end
+      if type(policy.default_provider) == 'string'
+         and policy.default_provider ~= ''
+         and not seen_default[policy.default_provider] then
+        table.insert(default_providers, policy.default_provider)
+        seen_default[policy.default_provider] = true
+      end
       
       -- 如果未配置 allow_providers，自动从 provider_map 中提取所有 provider
       local allow_providers = policy.allow_providers
@@ -234,7 +251,8 @@ local function normalize_config(cfg)
         policy = {
           allow_providers = allow_providers,
           allow_set = allow_set,
-          default_provider = policy.default_provider,
+          default_provider = default_providers[1],
+          default_providers = default_providers,
         },
       }
     end

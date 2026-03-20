@@ -1,5 +1,6 @@
 local runtime = require('config.runtime')
 local loader = require('config.loader')
+local stats = require('core.stats')
 
 local function load_config()
   local cfg, hash, err = loader.load()
@@ -20,6 +21,7 @@ if phase == 'init' then
 elseif phase == 'init_worker' then
   local seed = math.floor(ngx.now() * 1000) + (ngx.worker.id() or 0)
   math.randomseed(seed)
+  stats.setup_snapshot_worker()
   local interval = runtime.reload_interval
   local function reload(premature)
     if premature then
