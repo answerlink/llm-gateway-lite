@@ -5,6 +5,11 @@ CONFIG_DIR=${GATEWAY_CONFIG_DIR:-/etc/llm-gateway/conf.d}
 
 # 创建日志目录
 mkdir -p /var/log/llm-gateway
+# 统计快照会在该目录创建临时文件并原子替换，需要目录可写
+chmod 777 /var/log/llm-gateway
+# 创建配置历史版本目录，确保运行用户可写
+mkdir -p /var/log/llm-gateway/config-versions
+chmod 777 /var/log/llm-gateway/config-versions
 # 预创建 upstream.log，避免 worker 无权限创建新文件
 touch /var/log/llm-gateway/upstream.log
 chmod 666 /var/log/llm-gateway/upstream.log
